@@ -4,7 +4,7 @@ A light weight standalone [MCP](https://modelcontextprotocol.io) server that let
 Desktop Commander does, and also **see the screen and control the mouse and keyboard**: click, type, press shortcuts,
 scroll and drag things around.
 
-One Python 3 file, standard library only. No Node, no Homebrew, no compiler. Tested on macOS 27 (arm64).
+One Objective-C source file, built with the Xcode Command Line Tools, no dependencies beyond the system frameworks. No Node, no Python, no Homebrew, no sudo. Tested on macOS 27 (arm64).
 
 I created this because I needed to give an agent control over a macOS VM for testing something and for some reason all 
 of the existing solutions I tried did not work as intended so I created my own simple light weight solution.
@@ -23,48 +23,79 @@ Set `MC_ALLOWED=/path/one:/path/two` to restrict the file tools to those folders
 
 ## Install
 
-On the Mac you want to control:
+On the Mac you want to control (needs the Xcode Command Line Tools for `clang`; `xcode-select --install`):
 
 ```bash
 sh install.sh
 ```
 
-This copies the server to `~/mac-commander/` and installs a LaunchAgent (`local.mac-commander`) that runs it in your
-GUI login session and restarts it if it stops. It listens on a private unix socket, `~/.mac-commander.sock`
-(mode 0600, no network port). The agent must run in the **GUI session**: mouse clicks and drags are silently ignored
-from a plain ssh session.
+This compiles `macos-commander-controller.m` to `~/mac-commander/macos-commander-controller` and installs a
+LaunchAgent (`local.mac-commander`) that runs it in your GUI login session and restarts it if it stops. It listens on a
+private unix socket, `~/.mac-commander.sock` (mode 0600, no network port). The agent must run in the **GUI session**:
+mouse clicks and drags are silently ignored from a plain ssh session.
 
-You can also run it by hand, for testing: `python3 mac-commander.py` speaks MCP on stdin/stdout.
+You can also run the binary by hand for testing: with no arguments it speaks MCP on stdin/stdout.
+`--check` prints the permission state, `--request` shows the system permission prompts, `--version` prints the version.
 
 ## Permissions (required)
 
-macOS blocks screenshots and synthetic input until you allow them. Open **System Settings > Privacy & Security** and
-turn these on. You will be asked for your password, and the grants have to be made on the target Mac itself (or
-through its screen), since they are security settings.
+macOS blocks screenshots and synthetic input until you allow them. The program is a single compiled executable, so
+you grant these to **that executable only**, not to Python or a shell. On the Mac, open
+**System Settings > Privacy & Security** and turn on `macos-commander-controller` in both lists (your password is
+needed, and a person has to do this on the Mac itself):
 
-1. **Accessibility** (mouse and keyboard). Add the Python that runs the server (/usr/bin/python3).
-2. **Screen & System Audio Recording** (screenshots). Add the same Python (/usr/bin/python3).
+1. **Accessibility** (mouse and keyboard).
+2. **Screen & System Audio Recording** (screenshots).
 
-If it is not in the list, press **+**, then **Cmd+Shift+G** and paste the path.
-It may also be easy to navigate to /usr/bin in Finder **Cmd+Shift+G** and then drag the python executable onto the permission page.
+The executable is at:
 
-Note: This does give these permissions to all python3 programs on the Mac, so be careful if this is too broad and insecure
-for your purposes. For my use case, I can accept the risk that entails.
+```
+~/mac-commander/macos-commander-controller
+```
 
-If you run the server **over ssh instead of the LaunchAgent**, or when the first permission prompts appear while you
-are connected through ssh, macOS may attribute the request to `sshd-keygen-wrapper` (a name that can differ between
-macOS versions; look for `sshd` in the list). In that case add it to the same two lists:
+If it is not in a list, press **+**, then **Cmd+Shift+G**, and paste that full path. The quickest way to get the
+system prompts to appear, and to name the right program, is to run `--request` from inside the agent (so macOS
+attributes it to the executable, not to your terminal or ssh):
+
+```bash
+# from any MCP client, with the agent running:  start_process  ~/mac-commander/macos-commander-controller --request
+# or on the Mac, from Terminal:
+~/mac-commander/macos-commander-controller --request
+```
+
+macOS may also show a prompt saying "macos-commander-controller is requesting to bypass the system private window
+picker and directly access your screen and audio". Click **Allow**. macOS shows it again from time to time.
+
+After granting, restart the agent: `launchctl kickstart -k gui/$(id -u)/local.mac-commander`.
+`screen_info` reports `accessibility: granted` / `NOT granted` and the same for screen recording, so it is the quickest
+check. (Run `--check` through ssh and it reports ssh's permissions, not the agent's; ask the agent with `screen_info`.)
+
+### Rebuilding
+
+The executable is ad-hoc signed by the compiler. macOS ties a permission to the program, so after you rebuild
+(re-run `install.sh`) it may ask you to grant the two permissions again; if a toggle is on but `screen_info` says
+`NOT granted`, switch the toggle off and on, or remove it with **-** and re-add it.
+
+### Also possibly: `sshd-keygen-wrapper`
+
+Programs started over ssh (not by the LaunchAgent) are attributed to the ssh daemon. If you run the binary or anything
+else from an ssh session and want screenshots or key presses from it, macOS may list `sshd-keygen-wrapper` (the name
+can differ between versions; look for `sshd`) and you can add it to the same two lists:
 
 ```
 /usr/libexec/sshd-keygen-wrapper
 ```
 
-That grant lets ssh-launched processes take screenshots and send keyboard events, but **clicks and drags still
-will not work over ssh**; use the LaunchAgent for those.
+This is not needed for the LaunchAgent setup, and it still will not make clicks or drags work over ssh.
 
-After changing a permission, restart the agent: `launchctl kickstart -k gui/$(id -u)/local.mac-commander`.
+## Shell sessions
 
-`screen_info` reports `accessibility: granted` or `NOT granted`, which is the quickest check.
+`start_process` opens a terminal (pty) session. To keep the app from running out of terminals:
+
+- Finished sessions are forgotten as soon as their output has been read, and their terminal is closed.
+- At most 12 sessions stay open. Starting another closes the least recently used one and says so.
+- When a client disconnects, every session it started is killed.
+- Unread output is capped per session (the newest part is kept).
 
 ## Use with Claude Code
 
@@ -107,11 +138,12 @@ Use this when the agent and the Mac are the same machine. [mcp.json.example](mcp
 
 Replace `YOURNAME` with your account (use the full path; `~` is not expanded here). Or:
 `claude mcp add macos-commander -- nc -U "$HOME/.mac-commander.sock"`. This talks to the LaunchAgent from the
-install step, so the permissions are the Python grants above.
+install step, so the permissions are the executable's grants above.
 
-Alternative with no LaunchAgent: `"command": "python3", "args": ["/path/to/mac-commander.py"]`. The server then runs as
-a child of whatever launched your agent (Terminal, the Claude app, an editor), so **that app** is the one that needs
-Accessibility and Screen Recording, and it only works while that app is running in your GUI session.
+Alternative with no LaunchAgent: `"command": "/Users/YOURNAME/mac-commander/macos-commander-controller"` with no
+arguments. The server then runs as a child of whatever launched your agent (Terminal, the Claude app, an editor), so
+**that app** is the one that needs Accessibility and Screen Recording, and it only works while that app is running in
+your GUI session.
 
 ## Notes and limits
 
